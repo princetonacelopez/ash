@@ -1,4 +1,5 @@
 pub mod approve;
+pub mod audit;
 pub mod deny;
 pub mod diff;
 pub mod emit;
@@ -7,7 +8,9 @@ pub mod init;
 pub mod log;
 pub mod policy;
 pub mod run;
+pub mod schema;
 pub mod show;
 pub mod status;
+pub mod trust;
 pub mod undo;
 pub mod verify;

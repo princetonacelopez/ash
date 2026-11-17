@@ -117,6 +117,15 @@ pub struct PolicyRule {
     /// Scope of the grant: "once", "block_tree", "session", "project"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires: Option<String>,
+    /// Organization rules marked locked cannot be loosened by lower layers (§7.1).
+    #[serde(default)]
+    pub locked: bool,
+    /// Set by the loader, never read from TOML.
+    #[serde(default, skip_serializing)]
+    pub layer: String,
+    /// Network enforcement the rule needs: "os" | "proxy" | "none" (§7.3).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_min_enforcement: Option<String>,
 }
 
 /// Conditions that must all match for a rule to apply.
@@ -208,6 +217,9 @@ pub struct CompiledRule {
     /// Pre-compiled globsets for path matching
     pub write_globs: Option<GlobSet>,
     pub read_globs: Option<GlobSet>,
+    /// Layer: "builtin" | "user" | "project" | "org" (§7.1)
+    pub layer: String,
+    pub locked: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -246,35 +258,64 @@ impl ActorPattern {
 }
 
 impl CompiledPolicy {
-    /// Load and merge policy layers.
-    /// Layers: built-in → user → project (each can only tighten).
+    /// Load and merge policy layers: built-in, user, project (trusted), organization.
     pub fn load(project_root: Option<&Path>) -> Result<Self> {
-        let mut file = parse_policy(BUILTIN_POLICY).context("failed to parse built-in policy")?;
+        let mut layers: Vec<(String, PolicyFile)> = vec![(
+            "builtin".into(),
+            parse_policy(BUILTIN_POLICY).context("failed to parse built-in policy")?,
+        )];
 
-        // User layer: ~/.config/ash/policy.toml
         if let Some(config_dir) = dirs::config_dir() {
             let user_path = config_dir.join("ash").join("policy.toml");
             if user_path.exists() {
-                let user_layer = load_policy_file(&user_path)
+                let f = load_policy_file(&user_path)
                     .with_context(|| format!("failed to load user policy at {:?}", user_path))?;
-                merge_policy(&mut file, user_layer);
+                layers.push(("user".into(), f));
             }
         }
 
-        // Project layer: .ash/policy.toml (must be explicitly trusted)
+        // §7.6: project policy is inert until trusted by content hash.
         if let Some(root) = project_root {
             let proj_path = root.join(".ash").join("policy.toml");
             if proj_path.exists() && is_trusted_project(root) {
-                let proj_layer = load_policy_file(&proj_path)
+                let f = load_policy_file(&proj_path)
                     .with_context(|| format!("failed to load project policy at {:?}", proj_path))?;
-                merge_policy(&mut file, proj_layer);
+                layers.push(("project".into(), f));
             }
         }
 
-        compile_policy(file)
+        let org_path = std::env::var("ASH_ORG_POLICY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/etc/ash/policy.toml"));
+        if org_path.exists() {
+            layers.push(("org".into(), load_policy_file(&org_path)?));
+        }
+
+        Self::from_layers(layers)
     }
 
-    /// Find the first matching rule for a command evaluation context.
+    /// Build a policy from explicit (layer-name, file) pairs. Later layers' defaults win
+    /// except that no layer may loosen a default below an earlier one.
+    pub fn from_layers(layers: Vec<(String, PolicyFile)>) -> Result<Self> {
+        let mut iter = layers.into_iter();
+        let (name, mut base) = iter.next().context("no policy layers")?;
+        for r in base.rules.iter_mut() {
+            r.layer = name.clone();
+        }
+        for (name, mut layer) in iter {
+            for r in layer.rules.iter_mut() {
+                r.layer = name.clone();
+                // Only the org layer may lock rules.
+                if name != "org" {
+                    r.locked = false;
+                }
+            }
+            base.rules.extend(layer.rules);
+        }
+        compile_policy(base)
+    }
+
+    /// Evaluate per spec §7.1.
     pub fn evaluate(
         &self,
         actor: &Actor,
@@ -283,40 +324,62 @@ impl CompiledPolicy {
         tier: RiskTier,
         write_paths: &[PathBuf],
     ) -> PolicyEvaluation {
-        // Deny rules first
-        for rule in self.rules.iter().filter(|r| r.decision == Decision::Deny) {
-            if self.rule_matches(rule, actor, command, cwd, tier, write_paths) {
-                return PolicyEvaluation {
-                    decision: Decision::Deny,
-                    rule_id: Some(rule.id.clone()),
-                    reason: rule.reason.clone(),
-                    capabilities: None,
-                };
-            }
+        // 1-2. keep rules whose actor/match fit the block
+        let kept: Vec<&CompiledRule> = self
+            .rules
+            .iter()
+            .filter(|r| self.rule_matches(r, actor, command, cwd, tier, write_paths))
+            .collect();
+
+        // 3. any deny wins (org layer reported first)
+        let mut denies: Vec<&&CompiledRule> =
+            kept.iter().filter(|r| r.decision == Decision::Deny).collect();
+        denies.sort_by_key(|r| if r.layer == "org" { 0 } else { 1 });
+        if let Some(r) = denies.first() {
+            return PolicyEvaluation {
+                decision: Decision::Deny,
+                rule_id: Some(r.id.clone()),
+                layer: Some(r.layer.clone()),
+                reason: r.reason.clone(),
+                capabilities: None,
+            };
         }
 
-        // Then most specific allow rules
-        for rule in self.rules.iter().filter(|r| r.decision != Decision::Deny) {
-            if self.rule_matches(rule, actor, command, cwd, tier, write_paths) {
-                return PolicyEvaluation {
-                    decision: rule.decision.clone(),
-                    rule_id: Some(rule.id.clone()),
-                    reason: rule.reason.clone(),
-                    capabilities: Some(rule.capabilities.clone()),
-                };
+        // 4. most specific rule; ties resolve to the stricter decision
+        let best = kept.iter().copied().max_by(|a, b| {
+            specificity(a)
+                .cmp(&specificity(b))
+                .then_with(|| a.decision.cmp(&b.decision))
+        });
+        if let Some(r) = best {
+            let mut decision = r.decision.clone();
+            let mut winner = r;
+            // Locked org rules cannot be loosened by any lower layer.
+            let base = decision.clone();
+            for l in kept.iter().filter(|x| x.locked && x.decision > base) {
+                if l.decision > decision {
+                    decision = l.decision.clone();
+                    winner = l;
+                }
             }
+            return PolicyEvaluation {
+                decision,
+                rule_id: Some(winner.id.clone()),
+                layer: Some(winner.layer.clone()),
+                reason: winner.reason.clone(),
+                capabilities: Some(winner.capabilities.clone()),
+            };
         }
 
-        // Fall back to tier defaults
+        // 5. tier default for the actor
         let tier_decision = match actor {
             Actor::Human => self.defaults.human.for_tier(tier).clone(),
-            Actor::Agent { .. } => self.defaults.agent.for_tier(tier).clone(),
-            Actor::Script { .. } => self.defaults.agent.for_tier(tier).clone(),
+            Actor::Agent { .. } | Actor::Script { .. } => self.defaults.agent.for_tier(tier).clone(),
         };
-
         PolicyEvaluation {
             decision: tier_decision,
             rule_id: None,
+            layer: None,
             reason: None,
             capabilities: None,
         }
@@ -380,12 +443,23 @@ impl CompiledPolicy {
 #[derive(Debug, Clone)]
 pub struct PolicyEvaluation {
     pub decision: Decision,
+    pub layer: Option<String>,
     pub rule_id: Option<String>,
     pub reason: Option<String>,
     pub capabilities: Option<CapabilityGrant>,
 }
 
 // ─────────────────────────── Helpers ─────────────────────────────────────────
+
+/// Specificity tuple (§7.1): command, then path_write, then cwd_within, then actor.
+fn specificity(r: &CompiledRule) -> (bool, bool, bool, bool) {
+    (
+        !r.conditions.command.is_empty(),
+        r.write_globs.is_some(),
+        r.conditions.cwd_within.is_some(),
+        !matches!(r.actor_pattern, ActorPattern::Any | ActorPattern::AnyAgent),
+    )
+}
 
 fn parse_policy(s: &str) -> Result<PolicyFile> {
     toml::from_str(s).context("TOML parse error")
@@ -394,14 +468,6 @@ fn parse_policy(s: &str) -> Result<PolicyFile> {
 fn load_policy_file(path: &Path) -> Result<PolicyFile> {
     let content = std::fs::read_to_string(path)?;
     parse_policy(&content)
-}
-
-/// Merge `layer` into `base`, appending rules.
-/// Per spec §4.11: lower layers can only tighten, not loosen.
-fn merge_policy(base: &mut PolicyFile, layer: PolicyFile) {
-    // Rules are appended (evaluated in order, so later = less precedence)
-    // Deny rules will still win due to deny-first evaluation
-    base.rules.extend(layer.rules);
 }
 
 fn compile_policy(file: PolicyFile) -> Result<CompiledPolicy> {
@@ -419,6 +485,8 @@ fn compile_policy(file: PolicyFile) -> Result<CompiledPolicy> {
             expires: rule.expires,
             write_globs,
             read_globs,
+            layer: rule.layer,
+            locked: rule.locked,
             id: rule.id,
         });
     }
@@ -455,20 +523,47 @@ fn expand_env(s: &str) -> String {
     result
 }
 
-/// Check if a project directory is trusted for policy loading.
-/// Returns true if ~/.local/share/ash/trusted_projects contains this path.
-fn is_trusted_project(root: &Path) -> bool {
-    let trusted_file = dirs::data_local_dir()
+fn trust_file() -> PathBuf {
+    if let Ok(p) = std::env::var("ASH_TRUST_FILE") {
+        return PathBuf::from(p);
+    }
+    dirs::data_local_dir()
         .unwrap_or_else(|| PathBuf::from("~/.local/share"))
         .join("ash")
-        .join("trusted_projects");
+        .join("trusted_projects")
+}
 
-    if let Ok(content) = std::fs::read_to_string(&trusted_file) {
-        let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-        content.lines().any(|l| l.trim() == abs.to_string_lossy())
-    } else {
-        false
+fn policy_hash(root: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let bytes = std::fs::read(root.join(".ash").join("policy.toml")).ok()?;
+    Some(hex::encode(Sha256::digest(&bytes)))
+}
+
+/// §7.6: trust is keyed to the policy file's content hash; any change prompts again.
+pub fn is_trusted_project(root: &Path) -> bool {
+    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let hash = match policy_hash(root) {
+        Some(h) => h,
+        None => return false,
+    };
+    let want = format!("{} {}", abs.to_string_lossy(), hash);
+    std::fs::read_to_string(trust_file())
+        .map(|c| c.lines().any(|l| l.trim() == want))
+        .unwrap_or(false)
+}
+
+/// Record trust for the project's current policy content.
+pub fn trust_project(root: &Path) -> Result<()> {
+    use std::io::Write;
+    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let hash = policy_hash(root).context("no .ash/policy.toml to trust")?;
+    let tf = trust_file();
+    if let Some(d) = tf.parent() {
+        std::fs::create_dir_all(d)?;
     }
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(tf)?;
+    writeln!(f, "{} {}", abs.to_string_lossy(), hash)?;
+    Ok(())
 }
 
 #[cfg(test)]

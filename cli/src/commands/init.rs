@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use clap::Args;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Args, Debug)]
 pub struct InitArgs {
@@ -100,27 +100,5 @@ reason = "Secret and config files are protected"
 }
 
 fn trust_project(root: &Path) -> Result<()> {
-    let trusted_file = dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("~/.local/share"))
-        .join("ash")
-        .join("trusted_projects");
-
-    std::fs::create_dir_all(trusted_file.parent().unwrap())?;
-
-    let abs = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let abs_str = abs.to_string_lossy();
-
-    // Don't duplicate
-    if let Ok(content) = std::fs::read_to_string(&trusted_file) {
-        if content.lines().any(|l| l.trim() == abs_str) {
-            return Ok(());
-        }
-    }
-
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&trusted_file)?;
-    std::io::Write::write_all(&mut file, format!("{}\n", abs_str).as_bytes())?;
-    Ok(())
+    ashd::policy::config::trust_project(root)
 }

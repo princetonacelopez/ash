@@ -35,6 +35,36 @@ pub struct PtyProxy {
     recording: Arc<Mutex<Recording>>,
     /// Event publisher for output chunks
     event_tx: broadcast::Sender<String>,
+    /// Redaction applied before persistence/subscribers (§4.4)
+    redactor: crate::redact::Redactor,
+    /// Record raw bytes of full-screen programs (default false, §4.1)
+    record_fullscreen: bool,
+    /// True while the program is on the alternate screen
+    fullscreen: std::sync::atomic::AtomicBool,
+}
+
+/// Detect alternate-screen entry/exit (DECSET/DECRST 1049, 1047, 47).
+/// Returns Some(true) for entry, Some(false) for exit (last one in the chunk wins).
+pub fn detect_alt_screen(raw: &[u8]) -> Option<bool> {
+    let mut result = None;
+    let mut i = 0;
+    while i + 4 < raw.len() {
+        if raw[i] == 0x1b && raw[i + 1] == b'[' && raw[i + 2] == b'?' {
+            let mut j = i + 3;
+            while j < raw.len() && (raw[j].is_ascii_digit() || raw[j] == b';') {
+                j += 1;
+            }
+            if j < raw.len() && (raw[j] == b'h' || raw[j] == b'l') {
+                let params = std::str::from_utf8(&raw[i + 3..j]).unwrap_or("");
+                if params.split(';').any(|p| matches!(p, "1049" | "1047" | "47")) {
+                    result = Some(raw[j] == b'h');
+                }
+                i = j;
+            }
+        }
+        i += 1;
+    }
+    result
 }
 
 /// Session-wide output recording. Blocks reference by offset+length.
@@ -82,7 +112,24 @@ impl PtyProxy {
             session_id,
             recording: Arc::new(Mutex::new(recording)),
             event_tx,
+            redactor: crate::redact::Redactor::new(),
+            record_fullscreen: false,
+            fullscreen: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    pub fn with_redactor(mut self, r: crate::redact::Redactor) -> Self {
+        self.redactor = r;
+        self
+    }
+
+    pub fn with_record_fullscreen(mut self, yes: bool) -> Self {
+        self.record_fullscreen = yes;
+        self
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Process output flowing from the shell/process to the terminal emulator.
@@ -97,30 +144,51 @@ impl PtyProxy {
         raw: &[u8],
         block_id: Option<&str>,
     ) -> Result<SanitizedOutput> {
+        // Interactive blocks keep one merged PTY stream (§4.2).
+        self.process_output_stream(raw, block_id, "tty").await
+    }
+
+    /// Like `process_output`, tagging the stream ("tty", "stdout" or "stderr").
+    pub async fn process_output_stream(
+        &self,
+        raw: &[u8],
+        block_id: Option<&str>,
+        stream: &str,
+    ) -> Result<SanitizedOutput> {
+        use std::sync::atomic::Ordering;
         // Sanitize: strip spoofed OSC sequences
         let sanitized = sanitize_output(raw);
 
-        // Record to session-wide file
-        let (offset, length) = {
+        // §4.1: alternate-screen tracking
+        let was_fullscreen = self.fullscreen.load(Ordering::SeqCst);
+        if let Some(entered) = detect_alt_screen(&sanitized) {
+            self.fullscreen.store(entered, Ordering::SeqCst);
+        }
+        let in_fullscreen = was_fullscreen || self.fullscreen.load(Ordering::SeqCst);
+
+        // §4.4: redact before persistence or any subscriber sees offsets/bytes.
+        let (to_record, _report) = self.redactor.redact_bytes(&sanitized);
+
+        let (offset, length) = if in_fullscreen && !self.record_fullscreen {
+            (0, 0)
+        } else {
             let mut rec = self.recording.lock().await;
-            rec.append(&sanitized)?
+            rec.append(&to_record)?
         };
 
-        // Emit block.output event (high-volume, opt-in)
+        // Emit block.output (opt-in); never for full-screen programs.
         if let Some(bid) = block_id {
-            let event = serde_json::json!({
-                "v": 1,
-                "type": "block_output",
-                "ts": chrono::Utc::now().to_rfc3339(),
-                "session": self.session_id,
-                "block": bid,
-                "payload": {
-                    "offset": offset,
-                    "length": length,
-                    "stream": "stdout"
-                }
-            });
-            let _ = self.event_tx.send(serde_json::to_string(&event)?);
+            if !in_fullscreen {
+                let event = serde_json::json!({
+                    "v": 1,
+                    "type": "block_output",
+                    "ts": chrono::Utc::now().to_rfc3339(),
+                    "session": self.session_id,
+                    "block": bid,
+                    "data": { "offset": offset, "length": length, "stream": stream }
+                });
+                let _ = self.event_tx.send(serde_json::to_string(&event)?);
+            }
         }
 
         Ok(SanitizedOutput {
@@ -284,5 +352,19 @@ mod tests {
         assert!(!result.contains("1337"));
         assert!(result.contains("output"));
         assert!(result.contains("end"));
+    }
+}
+
+#[cfg(test)]
+mod v02_tests {
+    use super::*;
+
+    #[test]
+    fn alt_screen_detection() {
+        assert_eq!(detect_alt_screen(b"\x1b[?1049h"), Some(true));
+        assert_eq!(detect_alt_screen(b"\x1b[?1047h"), Some(true));
+        assert_eq!(detect_alt_screen(b"\x1b[?47h"), Some(true));
+        assert_eq!(detect_alt_screen(b"x\x1b[?1049h..\x1b[?1049l"), Some(false));
+        assert_eq!(detect_alt_screen(b"\x1b[?25h"), None);
     }
 }

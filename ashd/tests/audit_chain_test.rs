@@ -24,6 +24,9 @@ fn create_sample_block(session: &str, command: &str, exit: i32) -> Block {
         rule: None,
         approval: None,
         enforcement: EnforcementStatus::Full,
+        layer: None,
+        enforcement_report: None,
+        explain: None,
     });
     b
 }

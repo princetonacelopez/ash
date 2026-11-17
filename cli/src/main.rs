@@ -87,6 +87,15 @@ enum Commands {
 
     /// Show block details
     Show(commands::show::ShowArgs),
+
+    /// Audit log operations (`ash audit verify`)
+    Audit(commands::audit::AuditArgs),
+
+    /// Trust this project's policy file (bound to its content hash)
+    Trust(commands::trust::TrustArgs),
+
+    /// Discover and show a CLI schema for a binary
+    Schema(commands::schema::SchemaArgs),
 }
 
 #[tokio::main]
@@ -119,5 +128,8 @@ async fn main() -> Result<()> {
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Verify(args) => commands::verify::execute(args).await,
         Commands::Show(args) => commands::show::execute(args, session_id).await,
+        Commands::Audit(args) => commands::audit::execute(args).await,
+        Commands::Trust(args) => commands::trust::execute(args).await,
+        Commands::Schema(args) => commands::schema::execute(args).await,
     }
 }

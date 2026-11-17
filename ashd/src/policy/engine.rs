@@ -43,11 +43,44 @@ impl PolicyEngine {
             &write_paths,
         );
 
+        // §7.2 enforcement report: filesystem is partial (path filter), network none
+        // unless a proxy is configured, exec partial.
+        let report = crate::block::EnforcementReport {
+            filesystem: crate::block::EnforcementLevel::Partial,
+            network: if classification.network_access {
+                crate::block::EnforcementLevel::None
+            } else {
+                crate::block::EnforcementLevel::Os
+            },
+            exec: crate::block::EnforcementLevel::Partial,
+        };
+        let mut decision = eval.decision;
+        // A required capability at `none` escalates to at least `confirm`.
+        let unenforced = classification.network_access
+            && report.network == crate::block::EnforcementLevel::None;
+        if unenforced && decision < Decision::Confirm {
+            decision = Decision::Confirm;
+        }
+        let explain = format!(
+            "{} ({}) via {}{}",
+            decision,
+            classification.risk.tier,
+            eval.rule_id.as_deref().unwrap_or("tier-default"),
+            if unenforced { " [unenforced: network]" } else { "" }
+        );
+
         PolicyResult {
-            decision: eval.decision,
-            rule: eval.rule_id,
+            decision,
+            rule: eval.rule_id.clone(),
+            layer: eval.layer.clone(),
             approval: None,
-            enforcement: EnforcementStatus::Full, // set by sandbox
+            enforcement: if unenforced {
+                EnforcementStatus::Partial
+            } else {
+                EnforcementStatus::Full
+            },
+            enforcement_report: Some(report),
+            explain: Some(explain),
         }
     }
 

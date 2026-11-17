@@ -31,6 +31,11 @@ pub struct RunArgs {
     /// Scope: path(s) the agent is allowed to operate on
     #[arg(long)]
     pub scope: Option<String>,
+
+    /// Opt in to split stdout/stderr pipes for non-interactive commands (spec v0.2 §4.2).
+    /// Never automatic: programs change behavior when stdout is not a TTY.
+    #[arg(long)]
+    pub split_streams: bool,
 }
 
 pub async fn execute(args: RunArgs, session_id: Option<String>) -> Result<()> {
@@ -65,6 +70,14 @@ pub async fn execute(args: RunArgs, session_id: Option<String>) -> Result<()> {
     }
     if let Some(ref model) = args.model {
         cmd.env("ASH_MODEL", model);
+    }
+
+    // Run ID: ashd attributes blocks to this run (spec v0.2 §5.1, adapter mode)
+    let run_id = ulid::Ulid::new().to_string();
+    cmd.env("ASH_RUN_ID", &run_id);
+    println!("   Run: {}", run_id);
+    if args.split_streams {
+        cmd.env("ASH_SPLIT_STREAMS", "1");
     }
 
     // Actor identification for policy attribution

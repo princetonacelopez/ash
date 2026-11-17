@@ -401,6 +401,9 @@ async fn handle_hook_event(
                     rule: None,
                     approval: None,
                     enforcement: block::EnforcementStatus::Unenforced,
+                    layer: None,
+                    enforcement_report: None,
+                    explain: None,
                 });
 
                 let ev = block::Event::new(
@@ -560,7 +563,7 @@ fn parse_actor(event: &serde_json::Value) -> Actor {
 
 fn parse_approval_scope(s: &str) -> block::ApprovalScope {
     match s {
-        "block_tree" => block::ApprovalScope::BlockTree,
+        "run" | "block_tree" => block::ApprovalScope::Run,
         "session" => block::ApprovalScope::Session,
         "project" => block::ApprovalScope::Project,
         _ => block::ApprovalScope::Once,

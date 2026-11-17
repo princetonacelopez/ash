@@ -152,6 +152,47 @@ pub fn pre_exec_sandbox(_spec: SandboxSpec) -> impl FnMut() -> std::io::Result<(
     }
 }
 
+/// True when bubblewrap can create unprivileged sandboxes on this host.
+pub fn bwrap_usable() -> bool {
+    use std::process::{Command, Stdio};
+    Command::new("bwrap")
+        .args(["--ro-bind", "/", "/", "--unshare-net", "true"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Build a command that runs `sh -c <script>` inside a bubblewrap sandbox:
+/// root is read-only, only `fs_write` roots are writable, the network is
+/// unshared unless allowed, and each of `hidden_dirs` (e.g. the ashd control
+/// socket directory) is replaced by an empty tmpfs so sandboxed processes
+/// cannot reach the control socket (spec v0.2 §3.1, POL-02, POL-08).
+pub fn sandboxed_command(
+    spec: &SandboxSpec,
+    script: &str,
+    cwd: &str,
+    hidden_dirs: &[std::path::PathBuf],
+) -> std::process::Command {
+    let mut c = std::process::Command::new("bwrap");
+    c.args(["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc"]);
+    c.args(["--tmpfs", "/run/user"]);
+    for w in &spec.fs_write {
+        c.args(["--bind", w, w]);
+    }
+    for h in hidden_dirs {
+        if h.exists() {
+            c.arg("--tmpfs").arg(h);
+        }
+    }
+    if !spec.allow_network {
+        c.arg("--unshare-net");
+    }
+    c.args(["--die-with-parent", "--chdir", cwd, "sh", "-c", script]);
+    c
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

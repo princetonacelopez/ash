@@ -108,3 +108,29 @@ ash log
 # Verify tamper-evident cryptographic hash chain
 ash verify
 ```
+
+## v0.2 (spec `Spec_v0.2.md`)
+
+Implemented in this release:
+
+| Spec § | Feature | Where |
+|---|---|---|
+| 3.1 | Peer-UID check, 0700 dir / 0600 socket, `$ASH_SOCKET`, 1 MiB line limit (`oversize`) | `ashd/src/socket.rs` |
+| 3.2, 3.5 | Server-assigned `seq`, `ack`/`error` with client `id`, `subscribe`, `replay` (`replay.gap`), backpressure that never drops boundary/approval/policy events | `socket.rs` |
+| 3.3, 3.6, 3.7 | New event types, error registry, `welcome` with `server`/`limits`, `agent`/`schema`/`remote`/`redaction` capabilities | `block.rs` |
+| 4.1 | Full-screen (alt-screen) detection; no output events, raw bytes recorded only if opted in | `pty.rs` |
+| 4.2 | Stream tagging (`tty`/`stdout`/`stderr`), opt-in `ash run --split-streams` | `pty.rs`, `cli run` |
+| 4.3 | `ssh` / `docker exec` / `kubectl exec` → T3 `remote-opaque` | `policy/classifier.rs` |
+| 4.4 | Redaction before persistence (`[redacted:<kind>]`, counts only) | `redact.rs`, `pty.rs` |
+| 4.5 | Verbosity levels, announcement template, 80-char truncation, 2 s coalescing | `a11y.rs` |
+| 5 | Agent runs, `agent.exec` idempotency, grants (narrow-only, never auto above T1), run-level undo | `agent.rs` |
+| 6 | `--schema` discovery, sandboxed probe, trust model, `schema.violation`, secret masking | `schema.rs`, `ash schema` |
+| 7.1-7.4, 7.6 | Specificity evaluation, locked org rules, enforcement report, content-hash project trust (`ash trust`) | `policy/` |
+| 7.5 | Audit `seq`/`prev`, canonical JSON, rotation, anchor, `ash audit verify` | `audit.rs` |
+| 8 | Conformance tests (`cargo test -p ashd --test conformance_test`) and `ash-conform` harness | `ashd/tests`, `cli/src/conform.rs` |
+
+Known gaps (honest status): remote `ashd` socket forwarding (§4.3) is classification-only;
+the proxy network allowlist (§7.3) is modeled in the enforcement report but no proxy is
+shipped; CORE-03 foreign-UID rejection is implemented but only the owner path is testable
+single-user; A11Y-03 (screen reader protocol) and the freeze criteria in §8.4 need humans
+and second implementations.

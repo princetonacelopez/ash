@@ -61,6 +61,20 @@ pub fn classify(command: &str, cwd: &str) -> Classification {
         predicted_writes.push(path);
     }
 
+    // ── Remote execution without a remote ashd is opaque T3 (v0.2 §4.3) ─────
+    if is_remote_exec(&argv) {
+        return Classification {
+            risk: Risk {
+                tier: RiskTier::T3,
+                basis: RiskBasis::RemoteOpaque,
+                reason: Some("remote execution is opaque without a remote ashd".to_string()),
+            },
+            predicted_writes,
+            predicted_reads: vec![],
+            network_access: true,
+        };
+    }
+
     // ── Step 3: Registry lookup ──────────────────────────────────────────────
     let binary = argv[0].as_str();
     let subcommand = argv.get(1).map(|s| s.as_str());
@@ -105,6 +119,17 @@ pub fn classify(command: &str, cwd: &str) -> Classification {
         predicted_writes,
         predicted_reads: vec![],
         network_access,
+    }
+}
+
+/// `ssh ...`, `docker exec ...`, `kubectl exec ...`, `podman exec ...`.
+fn is_remote_exec(argv: &[String]) -> bool {
+    match argv.first().map(|s| s.as_str()) {
+        Some("ssh") | Some("mosh") => true,
+        Some("docker") | Some("podman") | Some("kubectl") => {
+            argv.iter().skip(1).any(|a| a == "exec")
+        }
+        _ => false,
     }
 }
 
@@ -254,6 +279,15 @@ fn apply_heuristics(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remote_exec_is_opaque_t3() {
+        for cmd in ["ssh host ls", "docker exec -it c sh", "kubectl exec pod -- ls"] {
+            let c = classify(cmd, "/tmp");
+            assert_eq!(c.risk.tier, RiskTier::T3, "{}", cmd);
+            assert_eq!(c.risk.basis, RiskBasis::RemoteOpaque);
+        }
+    }
 
     #[test]
     fn ls_is_t0() {
