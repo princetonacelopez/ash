@@ -5,7 +5,7 @@ resolver = "2"
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Princeton Ace Lopez <pal@aas.sh>"]
+authors = ["Princeton Ace Lopez <princetonacelopez@gmail.com>"]
 license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
