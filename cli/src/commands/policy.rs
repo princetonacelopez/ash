@@ -125,6 +125,7 @@ async fn explain_command(command: &str, actor_str: &str, cwd: &str) -> Result<()
     // Check registry
     let tier_str = match binary {
         "ls" | "cat" | "echo" | "grep" | "find" | "stat" | "du" | "df" => "T0 (registry: read-only)",
+        "git" if matches!(subcommand, Some("status") | Some("log") | Some("diff") | Some("branch") | Some("show")) => "T0 (registry: read-only)",
         "cp" | "mv" | "mkdir" | "touch" | "sed" => "T1 (registry: reversible write)",
         "rm" if flags.contains(&"-rf") || flags.contains(&"-r") => "T2 (heuristic: recursive delete)",
         "git" if subcommand == Some("push") || subcommand == Some("pull") => "T3 (registry: external side effect)",

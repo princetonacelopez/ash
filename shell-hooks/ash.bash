@@ -5,16 +5,15 @@
 # Or:
 #   eval "$(ash hook bash)"
 
-if command -v ashd &>/dev/null && [[ -z "${ASH_ENABLED}" ]]; then
+if command -v ashd &>/dev/null && [[ -z "${ASH_ENABLED:-}" ]]; then
 
 # ── Session initialization ─────────────────────────────────────────────────
 _ash_init() {
-  if [[ -z "${ASH_SESSION_ID}" ]]; then
+  if [[ -z "${ASH_SESSION_ID:-}" ]]; then
     local session_id="session-$$-${RANDOM}"
     local runtime_dir="${XDG_RUNTIME_DIR:-/tmp/ash-$UID}"
     local socket_path="${runtime_dir}/ash/${session_id}.sock"
 
-    # Start ashd in background if not already running for this session
     ashd --session-id "${session_id}" &>/dev/null &
     disown $! 2>/dev/null || true
 
@@ -27,7 +26,7 @@ _ash_init() {
 # ── Event emitter ──────────────────────────────────────────────────────────
 _ash_emit() {
   local event_json="$1"
-  if [[ -n "${ASH_SOCKET}" ]]; then
+  if [[ -n "${ASH_SOCKET:-}" ]]; then
     if command -v nc &>/dev/null; then
       printf '%s\n' "$event_json" | nc -U "${ASH_SOCKET}" 2>/dev/null &
     elif command -v ash &>/dev/null; then
@@ -45,10 +44,10 @@ _ash_debug_trap() {
   # Skip ash internals
   case "$command" in
     _ash_*|"ash "*) return ;;
-    /undo*|/diff*|/explain*|/approve*|/deny*) return ;;
+    /undo*|/diff*|/explain*|/approve*|/deny*|/status*|/log*|/policy*|/verify*) return ;;
   esac
 
-  if [[ "${_ASH_SKIP_NEXT}" == "1" ]]; then
+  if [[ "${_ASH_SKIP_NEXT:-}" == "1" ]]; then
     unset _ASH_SKIP_NEXT
     return
   fi
@@ -57,7 +56,7 @@ _ash_debug_trap() {
   cwd="$(pwd)"
 
   local actor_kind="human"
-  if [[ -n "${ASH_ACTOR_KIND}" ]]; then
+  if [[ -n "${ASH_ACTOR_KIND:-}" ]]; then
     actor_kind="${ASH_ACTOR_KIND}"
   fi
 
@@ -81,7 +80,7 @@ _ash_debug_trap() {
 _ash_prompt_command() {
   local exit_code=$?
 
-  if [[ -n "${_ASH_CURRENT_BLOCK}" ]]; then
+  if [[ -n "${_ASH_CURRENT_BLOCK:-}" ]]; then
     local event
     event=$(printf '{"type":"block.end","block":"%s","exit_code":%d,"session":"%s"}' \
       "${_ASH_CURRENT_BLOCK}" "${exit_code}" "${ASH_SESSION_ID:-}")
@@ -106,13 +105,17 @@ _ash_prompt_command() {
 /explain() { ash policy explain "$*"; }
 /approve() { ash approve "$@"; }
 /deny() { ash deny "$@"; }
+/status() { ash status "$@"; }
+/log() { ash log "$@"; }
+/policy() { ash policy show "$@"; }
+/verify() { ash verify "$@"; }
 
 undo() { ash undo "$@"; }
 explain() { ash policy explain "$*"; }
 
 # ── Register hooks ─────────────────────────────────────────────────────────
 _ash_register_hooks() {
-  if [[ "${PROMPT_COMMAND}" != *"_ash_prompt_command"* ]]; then
+  if [[ "${PROMPT_COMMAND:-}" != *"_ash_prompt_command"* ]]; then
     PROMPT_COMMAND="_ash_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
   fi
 

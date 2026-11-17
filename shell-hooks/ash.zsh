@@ -81,7 +81,7 @@ _ash_preexec() {
   cwd="$(pwd)"
 
   case "$command" in
-    /undo*|/diff*|/explain*|/approve*|/deny*) return ;;
+    /undo*|/diff*|/explain*|/approve*|/deny*|/status*|/log*|/policy*|/verify*) return ;;
     @*) return ;;
   esac
 
@@ -126,6 +126,10 @@ _ash_preexec() {
 /explain() { ash policy explain "$*"; }
 /approve() { ash approve "$@"; }
 /deny() { ash deny "$@"; }
+/status() { ash status "$@"; }
+/log() { ash log "$@"; }
+/policy() { ash policy show "$@"; }
+/verify() { ash verify "$@"; }
 
 # ── Register hooks ─────────────────────────────────────────────────────────
 _ash_register_hooks() {
