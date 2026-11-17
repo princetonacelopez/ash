@@ -1,0 +1,32 @@
+# ash project policy
+# This file is checked in with the project. It can only *tighten* the user's
+# policy, never loosen it (spec §4.11). To take effect, users must trust this
+# project: 'ash init --trust' or 'ash trust'.
+version = 1
+
+# Allow agents to read and write within this project root
+[[rule]]
+id = "project-write"
+actor = "agent:*"
+match.cwd_within = "/home/princetonacelopez/Projects/aas"
+match.path_write = ["/home/princetonacelopez/Projects/aas/**"]
+capabilities.fs_write = ["/home/princetonacelopez/Projects/aas"]
+capabilities.network = []
+decision = "allow_snapshot"
+
+# Allow npm/pnpm install (needs registry access)
+[[rule]]
+id = "registry-installs"
+actor = "agent:*"
+match.command = ["npm install", "pnpm add", "pnpm install", "yarn install", "bun install"]
+capabilities.network = ["registry.npmjs.org"]
+decision = "allow_snapshot"
+expires = "session"
+
+# Never allow key material to be touched (belt-and-suspenders)
+[[rule]]
+id = "protect-secrets"
+actor = "any"
+match.path_write = ["~/.ssh/**", "~/.gnupg/**", "~/.config/ash/**"]
+decision = "deny"
+reason = "Secret and config files are protected"

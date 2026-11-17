@@ -1,6 +1,7 @@
 pub mod approve;
 pub mod deny;
 pub mod diff;
+pub mod emit;
 pub mod hook;
 pub mod init;
 pub mod log;

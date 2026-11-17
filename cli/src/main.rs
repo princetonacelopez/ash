@@ -75,6 +75,10 @@ enum Commands {
     /// Output shell integration script (zsh, bash, fish)
     Hook(commands::hook::HookArgs),
 
+    /// Emit an event to the ashd daemon socket (internal hook helper)
+    #[command(hide = true)]
+    Emit(commands::emit::EmitArgs),
+
     /// Manage policy files
     Policy(commands::policy::PolicyArgs),
 
@@ -111,6 +115,7 @@ async fn main() -> Result<()> {
         Commands::Status(args) => commands::status::execute(args, session_id).await,
         Commands::Init(args) => commands::init::execute(args).await,
         Commands::Hook(args) => commands::hook::execute(args).await,
+        Commands::Emit(args) => commands::emit::execute(args, session_id).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Verify(args) => commands::verify::execute(args).await,
         Commands::Show(args) => commands::show::execute(args, session_id).await,

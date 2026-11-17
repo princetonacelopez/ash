@@ -1,28 +1,25 @@
 # ash.bash - Agentic Shell Layer hook for Bash
 #
 # Source this file in your .bashrc:
-#   source ~/.config/ash/ash.bash
-#
-# Or install it automatically:
-#   ash hook bash >> ~/.bashrc
+#   source <(ash hook bash)
+# Or:
+#   eval "$(ash hook bash)"
 
-# ── Guard ─────────────────────────────────────────────────────────────────
-if [[ -z "${ASH_ENABLED}" ]]; then
-  if ! command -v ashd &>/dev/null; then
-    return 0
-  fi
-fi
+if command -v ashd &>/dev/null && [[ -z "${ASH_ENABLED}" ]]; then
 
 # ── Session initialization ─────────────────────────────────────────────────
 _ash_init() {
   if [[ -z "${ASH_SESSION_ID}" ]]; then
-    local ashd_env
-    ashd_env=$(ashd 2>/dev/null)
-    if [[ $? -eq 0 ]]; then
-      eval "$ashd_env"
-      export ASH_SESSION_ID
-      export ASH_SOCKET
-    fi
+    local session_id="session-$$-${RANDOM}"
+    local runtime_dir="${XDG_RUNTIME_DIR:-/tmp/ash-$UID}"
+    local socket_path="${runtime_dir}/ash/${session_id}.sock"
+
+    # Start ashd in background if not already running for this session
+    ashd --session-id "${session_id}" &>/dev/null &
+    disown $! 2>/dev/null || true
+
+    export ASH_SESSION_ID="${session_id}"
+    export ASH_SOCKET="${socket_path}"
   fi
   export ASH_ENABLED=1
 }
@@ -31,7 +28,13 @@ _ash_init() {
 _ash_emit() {
   local event_json="$1"
   if [[ -n "${ASH_SOCKET}" ]]; then
-    printf '%s\n' "$event_json" | socat - UNIX-CLIENT:"${ASH_SOCKET}" 2>/dev/null &
+    if command -v nc &>/dev/null; then
+      printf '%s\n' "$event_json" | nc -U "${ASH_SOCKET}" 2>/dev/null &
+    elif command -v ash &>/dev/null; then
+      ash emit "$event_json" 2>/dev/null &
+    elif command -v socat &>/dev/null; then
+      printf '%s\n' "$event_json" | socat - UNIX-CLIENT:"${ASH_SOCKET}" 2>/dev/null &
+    fi
   fi
 }
 
@@ -41,7 +44,8 @@ _ash_debug_trap() {
 
   # Skip ash internals
   case "$command" in
-    _ash_*|ash *) return ;;
+    _ash_*|"ash "*) return ;;
+    /undo*|/diff*|/explain*|/approve*|/deny*) return ;;
   esac
 
   if [[ "${_ASH_SKIP_NEXT}" == "1" ]]; then
@@ -97,19 +101,25 @@ _ash_prompt_command() {
 }
 
 # ── Shell builtins ─────────────────────────────────────────────────────────
+/undo() { ash undo "$@"; }
+/diff() { ash diff "$@"; }
+/explain() { ash policy explain "$*"; }
+/approve() { ash approve "$@"; }
+/deny() { ash deny "$@"; }
+
 undo() { ash undo "$@"; }
 explain() { ash policy explain "$*"; }
 
 # ── Register hooks ─────────────────────────────────────────────────────────
 _ash_register_hooks() {
-  # Prepend to PROMPT_COMMAND
   if [[ "${PROMPT_COMMAND}" != *"_ash_prompt_command"* ]]; then
     PROMPT_COMMAND="_ash_prompt_command${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
   fi
 
-  # Set DEBUG trap (note: this may conflict with other traps)
   trap '_ash_debug_trap' DEBUG
 }
 
 _ash_init
 _ash_register_hooks
+
+fi
